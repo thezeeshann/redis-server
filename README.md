@@ -12,10 +12,6 @@ $ redis-cli GET name
 "Zeeshan"
 ```
 
-The point of the project is to understand what Redis actually *is* underneath: a TCP server, a text protocol, a hash map, and an append-only log.
-
----
-
 ## Running it
 
 ```bash
@@ -48,21 +44,9 @@ If `redis-cli` starts printing like this:
 <!-- prettier-ignore -->
 ```
 127.0.0.1:6379> ls
-                  (error) ERR unknown command 'ls'
-                                                  127.0.0.1:6379>
+(error) ERR unknown command 'ls'
+127.0.0.1:6379>
 ```
-
-your terminal is stuck in raw mode — not a server problem. Interactive `redis-cli`
-uses linenoise, which disables the terminal's `ONLCR` flag (the one that turns a
-bare `\n` into `\r\n`) while reading a line, and restores it afterwards. If a
-session dies before restoring it, every later newline moves down without
-returning to column 0.
-
-```bash
-stty sane      # fixes it; `reset` if the prompt is garbled too
-```
-
----
 
 ## How it fits together
 
@@ -105,26 +89,6 @@ aof.go         append write-commands to database.aof
 | `internal/redis/handler.go` | Command implementations and the in-memory dataset |
 | `internal/redis/aof.go` | Durability — the append-only file |
 | `database.aof` | The log of every write command, replayed at startup |
-
-### Why the server loop lives in the package, not in `main`
-
-Go allows one package per directory, so `cmd/` and `internal/redis/` are
-necessarily separate packages. `Value`'s fields (`typ`, `bulk`, `array`, …) are
-lowercase, which means only code *inside* the package can touch them. Keeping
-the connection loop in `main` would have forced every one of those fields to be
-exported, so `main` could construct error replies.
-
-Putting the loop in `internal/redis` instead keeps `Value` completely private
-and leaves the package with one exported entry point:
-
-```go
-redis.ListenAndServe(":6379", "database.aof")
-```
-
-`internal/` is a name Go treats specially: nothing outside this module can
-import it, so the whole thing stays an implementation detail.
-
----
 
 ## RESP — the protocol
 
@@ -181,7 +145,6 @@ Two details in there that matter more than they look:
 - **`io.ReadFull` in `readBulk`.** A plain `Read` is allowed to return fewer bytes than you asked for. If it does, the rest of the value gets misread as the start of the next command, and the stream is silently corrupted from that point on.
 - **One `Resp` per connection, not per command.** `bufio.Reader` reads ahead in chunks. Building a fresh one for every command throws away whatever it had already buffered, so pipelined commands vanish.
 
----
 
 ## AOF — how data survives a restart
 
@@ -224,8 +187,6 @@ RDB is Redis's *other* persistence mode: a periodic binary snapshot of the whole
 
 `SET counter 1` a thousand times and the AOF holds a thousand entries, all but the last irrelevant. Real Redis solves this with **AOF rewrite**: periodically replacing the log with the shortest command sequence that reproduces the current state. Not implemented here — it is the natural next thing to build.
 
----
-
 ## Commands
 
 | Command | Reply | Persisted |
@@ -266,8 +227,6 @@ ERR unknown command 'FLUSHALL'
 
 Validate your argument count and return `Value{typ: "error", ...}` on a mismatch, the way `set` and `get` do.
 
----
-
 ## Concurrency
 
 Each client gets its own goroutine, so several can connect at once. Two things guard the shared state:
@@ -280,14 +239,3 @@ Race detector:
 ```bash
 go run -race ./cmd
 ```
-
----
-
-## Ideas to build next
-
-- **AOF rewrite / compaction** — the limitation described above; the most valuable addition.
-- **`EXPIRE` and TTLs** — needs a clock and a key-eviction strategy, and forces a real question: what does a replayed AOF do with an expiry that has already passed?
-- **Hashes** — `HSET` / `HGET` / `HGETALL`, a second map alongside `SETs`.
-- **`INCR`** — read-modify-write, so it has to be atomic under the mutex.
-- **Configurable port** — `:6379` is currently the `address` constant in `cmd/main.go`.
-- **Tests** — `internal/redis/resp.go` is the easiest and highest-value place to start: feed it byte strings, assert on the `Value` you get back. Being in the same package, a test can reach `Value`'s unexported fields directly.

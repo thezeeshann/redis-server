@@ -3,7 +3,7 @@
 A Redis server written from scratch in Go, with no dependencies outside the standard library. It speaks the real Redis wire protocol, so the official `redis-cli` connects to it and talks to it like any other Redis instance.
 
 ```
-$ go run .
+$ go run ./cmd
 Listening on :6379
 
 $ redis-cli SET name Zeeshan
@@ -19,11 +19,20 @@ The point of the project is to understand what Redis actually *is* underneath: a
 ## Running it
 
 ```bash
-go run .                 # start on :6379
+go run ./cmd             # start on :6379
 redis-cli                # connect with the real Redis client
 ```
 
+Run it from the project root — the AOF path is relative to the working
+directory, so `database.aof` is created there.
+
 Stop it with `Ctrl+C` — the server flushes the AOF to disk before exiting.
+Note that `go run` does not forward the interrupt to the program it builds, so
+the clean-shutdown path only runs for a compiled binary:
+
+```bash
+go build -o redis-server ./cmd && ./redis-server
+```
 
 If you get `bind: address already in use`, something else already holds port 6379 (often a real `redis-server`, or a leftover copy of this one):
 
@@ -36,6 +45,7 @@ kill <pid>
 
 If `redis-cli` starts printing like this:
 
+<!-- prettier-ignore -->
 ```
 127.0.0.1:6379> ls
                   (error) ERR unknown command 'ls'
@@ -57,10 +67,25 @@ stty sane      # fixes it; `reset` if the prompt is garbled too
 ## How it fits together
 
 ```
+build-redis/
+├── cmd/
+│   └── main.go              entry point: calls redis.ListenAndServe
+├── internal/
+│   └── redis/
+│       ├── server.go        accept loop, dispatch, shutdown
+│       ├── resp.go          the RESP protocol
+│       ├── handler.go       commands + the in-memory dataset
+│       └── aof.go           durability
+└── database.aof             the log itself
+```
+
+The request path:
+
+```
 redis-cli
     │  TCP :6379
     ▼
-main.go        accept loop, one goroutine per client
+server.go      accept loop, one goroutine per client
     │
     ▼
 resp.go        decode bytes → Value, encode Value → bytes
@@ -74,11 +99,30 @@ aof.go         append write-commands to database.aof
 
 | File | Responsibility |
 |------|----------------|
-| `main.go` | TCP listener, connection handling, command dispatch, shutdown |
-| `resp.go` | The RESP protocol — reading and writing |
-| `handler.go` | Command implementations and the in-memory dataset |
-| `aof.go` | Durability — the append-only file |
+| `cmd/main.go` | Entry point — wires the address and AOF path together |
+| `internal/redis/server.go` | TCP listener, connection handling, command dispatch, shutdown |
+| `internal/redis/resp.go` | The RESP protocol — reading and writing |
+| `internal/redis/handler.go` | Command implementations and the in-memory dataset |
+| `internal/redis/aof.go` | Durability — the append-only file |
 | `database.aof` | The log of every write command, replayed at startup |
+
+### Why the server loop lives in the package, not in `main`
+
+Go allows one package per directory, so `cmd/` and `internal/redis/` are
+necessarily separate packages. `Value`'s fields (`typ`, `bulk`, `array`, …) are
+lowercase, which means only code *inside* the package can touch them. Keeping
+the connection loop in `main` would have forced every one of those fields to be
+exported, so `main` could construct error replies.
+
+Putting the loop in `internal/redis` instead keeps `Value` completely private
+and leaves the package with one exported entry point:
+
+```go
+redis.ListenAndServe(":6379", "database.aof")
+```
+
+`internal/` is a name Go treats specially: nothing outside this module can
+import it, so the whole thing stays an implementation detail.
 
 ---
 
@@ -216,7 +260,7 @@ ERR unknown command 'FLUSHALL'
 
 ### Adding a command
 
-1. Write `func mycmd(args []Value) Value` in `handler.go`.
+1. Write `func mycmd(args []Value) Value` in `internal/redis/handler.go`.
 2. Register it in the `Handlers` map.
 3. If it changes state, add it to `writeCommands` too — forget this and it works until the first restart, then quietly loses data.
 
@@ -234,7 +278,7 @@ Each client gets its own goroutine, so several can connect at once. Two things g
 Race detector:
 
 ```bash
-go run -race .
+go run -race ./cmd
 ```
 
 ---
@@ -245,5 +289,5 @@ go run -race .
 - **`EXPIRE` and TTLs** — needs a clock and a key-eviction strategy, and forces a real question: what does a replayed AOF do with an expiry that has already passed?
 - **Hashes** — `HSET` / `HGET` / `HGETALL`, a second map alongside `SETs`.
 - **`INCR`** — read-modify-write, so it has to be atomic under the mutex.
-- **Configurable port** — `:6379` is currently the `address` constant in `main.go`.
-- **Tests** — `resp.go` is the easiest and highest-value place to start: feed it byte strings, assert on the `Value` you get back.
+- **Configurable port** — `:6379` is currently the `address` constant in `cmd/main.go`.
+- **Tests** — `internal/redis/resp.go` is the easiest and highest-value place to start: feed it byte strings, assert on the `Value` you get back. Being in the same package, a test can reach `Value`'s unexported fields directly.

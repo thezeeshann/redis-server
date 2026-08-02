@@ -1,4 +1,4 @@
-package main
+package redis
 
 import (
 	"fmt"
@@ -10,31 +10,28 @@ import (
 	"syscall"
 )
 
-const address = ":6379"
-
 // execMu serializes command execution across connections, so the order of
 // commands in the AOF always matches the order they were applied in memory.
 // Real Redis gets this for free by being single threaded.
 var execMu sync.Mutex
 
-func main() {
-	aof, err := NewAof("database.aof")
+// ListenAndServe opens the append-only file at aofPath, replays it to rebuild
+// the dataset, then serves clients on address until the process is interrupted.
+func ListenAndServe(address, aofPath string) error {
+	aof, err := NewAof(aofPath)
 	if err != nil {
-		fmt.Println("Error opening AOF:", err)
-		return
+		return fmt.Errorf("opening AOF: %w", err)
 	}
 	defer aof.Close()
 
 	// Rebuild state from the log before accepting any client.
 	if err := replay(aof); err != nil {
-		fmt.Println("Error replaying AOF:", err)
-		return
+		return fmt.Errorf("replaying AOF: %w", err)
 	}
 
 	l, err := net.Listen("tcp", address)
 	if err != nil {
-		fmt.Println("Error starting server:", err)
-		return
+		return fmt.Errorf("listening on %s: %w", address, err)
 	}
 
 	shutdown := make(chan os.Signal, 1)
@@ -53,7 +50,7 @@ func main() {
 		if err != nil {
 			// Accept fails once the listener is closed by the signal handler,
 			// which is the normal shutdown path rather than a real error.
-			return
+			return nil
 		}
 
 		go handleConn(conn, aof)
